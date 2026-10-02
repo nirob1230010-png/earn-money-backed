@@ -26,8 +26,8 @@ const User = mongoose.model('User', new mongoose.Schema({
   isBanned: { type: Boolean, default: false },
   referralCode: { type: String, unique: true },
   referredBy: String,
-  hasCompletedTask: { type: Boolean, default: false },   // 🆕 First task complete hoyeche?
-  referralBonusPaid: { type: Boolean, default: false },  // 🆕 Referrer bonus peyeche?
+  hasCompletedTask: { type: Boolean, default: false },
+  referralBonusPaid: { type: Boolean, default: false },
 }, { timestamps: true }));
 
 const Task = mongoose.model('Task', new mongoose.Schema({
@@ -70,7 +70,6 @@ const adminAuth = (req, res, next) => {
   } catch { res.status(403).json({ error: 'Admin only' }); }
 };
 
-// 🎁 CONFIG
 const WELCOME_BONUS = 50;
 const MIN_WITHDRAW = 100;
 const REFERRAL_BONUS = 25;
@@ -89,9 +88,6 @@ app.post('/api/register', async (req, res) => {
       phone, password: hash, deviceId, name, referralCode: myCode, referredBy: referralCode,
       balance: WELCOME_BONUS, totalEarned: WELCOME_BONUS
     });
-
-    // ⚠️ Referral bonus ekhon e dewa hobe na!
-    // Referred user first task complete korle, admin approve korle referrer bonus pabe
 
     const token = jwt.sign({ id: user._id, phone, role: 'user' }, process.env.JWT_SECRET, { expiresIn: '30d' });
     res.json({
@@ -217,7 +213,6 @@ app.get('/api/admin/submissions', adminAuth, async (req, res) => {
   res.json(await Submission.find().sort({ createdAt: -1 }));
 });
 
-// 🎯 Task verify — Referral bonus ekhan theke trigger hobe
 app.post('/api/admin/verify-task', adminAuth, async (req, res) => {
   const { subId, status, rejectReason } = req.body;
   const sub = await Submission.findById(subId);
@@ -234,18 +229,13 @@ app.post('/api/admin/verify-task', adminAuth, async (req, res) => {
     user.balance += sub.rewardAmt;
     user.totalEarned += sub.rewardAmt;
     
-    // 🎁 Referral Bonus Logic
-    // Jodi user er referredBy ache, ar ei user er first task approve holo,
-    // Ar referral bonus already dewa hoy nai
     if (user.referredBy && !user.referralBonusPaid) {
       const referrer = await User.findOne({ referralCode: user.referredBy });
       if (referrer && !referrer.isBanned) {
-        // Referrer ke 25৳ bonus dao
         await User.updateOne(
           { _id: referrer._id },
           { $inc: { balance: REFERRAL_BONUS, totalEarned: REFERRAL_BONUS } }
         );
-        // Mark as paid
         user.referralBonusPaid = true;
         user.hasCompletedTask = true;
       }
