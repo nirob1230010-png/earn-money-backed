@@ -355,3 +355,5 @@ app.delete('/api/admin/notice/:id', adminAuth, async (req, res) => {
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 EARN MONEY Backend on port ${PORT}`));
 // Bonus force update Sat Oct  3 10:03:14 +06 2026
+// Force commit Sat Oct  3 10:22:16 +06 2026
+// BONUS_FORCE_UPDATE
