@@ -252,3 +252,6 @@ app.get('/api/postback/offertoro', async (req, res) => { try { const { user_id, 
 app.get('/api/postback/bitlabs', async (req, res) => { try { const { user_id, amount, trans_id, status } = req.query; if (status !== '1') return res.send('OK'); const result = await processReward(user_id, amount, trans_id, 'BitLabs'); if (result.status === 'NOT_FOUND') return res.status(404).send('USER_NOT_FOUND'); res.send('OK'); } catch (e) { res.status(500).send('ERROR'); } });
 app.get('/api/postback/adgem', async (req, res) => { try { const { user_id, amount, trans_id, status } = req.query; if (status !== '1') return res.send('OK'); const result = await processReward(user_id, amount, trans_id, 'AdGem'); if (result.status === 'NOT_FOUND') return res.status(404).send('USER_NOT_FOUND'); res.send('OK'); } catch (e) { res.status(500).send('ERROR'); } });
 app.get('/api/postback/ayet', async (req, res) => { try { const { user_id, amount, trans_id, status } = req.query; if (status !== '1') return res.send('OK'); const result = await processReward(user_id, amount, trans_id, 'Ayet Studios'); if (result.status === 'NOT_FOUND') return res.status(404).send('USER_NOT_FOUND'); res.send('OK'); } catch (e) { res.status(500).send('ERROR'); } });
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`🚀 EARN MONEY Backend on port ${PORT}`));
