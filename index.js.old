@@ -253,11 +253,65 @@ app.get('/api/postback/bitlabs', async (req, res) => { try { const { user_id, am
 app.get('/api/postback/adgem', async (req, res) => { try { const { user_id, amount, trans_id, status } = req.query; if (status !== '1') return res.send('OK'); const result = await processReward(user_id, amount, trans_id, 'AdGem'); if (result.status === 'NOT_FOUND') return res.status(404).send('USER_NOT_FOUND'); res.send('OK'); } catch (e) { res.status(500).send('ERROR'); } });
 app.get('/api/postback/ayet', async (req, res) => { try { const { user_id, amount, trans_id, status } = req.query; if (status !== '1') return res.send('OK'); const result = await processReward(user_id, amount, trans_id, 'Ayet Studios'); if (result.status === 'NOT_FOUND') return res.status(404).send('USER_NOT_FOUND'); res.send('OK'); } catch (e) { res.status(500).send('ERROR'); } });
 
+// ============ BITCOTASKS POSTBACK ============
+app.get('/api/postback/bitcotasks', async (req, res) => {
+  try {
+    console.log('📥 Bitcotasks:', req.query);
+    const { user_id, subid, amount, payout, trans_id, status } = req.query;
+    
+    const userId = user_id || subid;
+    const amt = amount || payout;
+    
+    if (status && status !== '1') return res.send('OK');
+    if (!userId || !amt) return res.status(400).send('MISSING_PARAMS');
+    
+    const existing = await Submission.findOne({ transactionId: trans_id });
+    if (existing) return res.send('OK');
+    
+    const user = await User.findOne({ phone: userId });
+    if (!user) return res.status(404).send('USER_NOT_FOUND');
+    if (user.isBanned) return res.status(403).send('USER_BANNED');
+    
+    const usdAmount = parseFloat(amt);
+    const bdtAmount = Math.floor(usdAmount * USD_TO_BDT * (USER_REWARD_PERCENT / 100));
+    
+    await User.updateOne(
+      { _id: user._id },
+      { $inc: { balance: bdtAmount, totalEarned: bdtAmount } }
+    );
+    
+    await Submission.create({
+      phone: user.phone,
+      taskTitle: 'Bitcotasks Task',
+      rewardAmt: bdtAmount,
+      status: 'APPROVED',
+      siteUsername: 'Bitcotasks',
+      transactionId: trans_id || 'N/A',
+    });
+    
+    // Update task counters
+    const today = getDateStr();
+    const week = getWeekStr();
+    const isNewDay = user.lastTaskDate !== today;
+    const isNewWeek = user.lastWeekReset !== week;
+    
+    await User.updateOne(
+      { _id: user._id },
+      { $set: {
+        lastTaskDate: today, lastWeekReset: week,
+        todayTaskCount: isNewDay ? 1 : (user.todayTaskCount || 0) + 1,
+        weekTaskCount: isNewWeek ? 1 : (user.weekTaskCount || 0) + 1,
+        streakBonusPaid: isNewDay ? false : user.streakBonusPaid,
+        weeklyBonusPaid: isNewWeek ? false : user.weeklyBonusPaid,
+      }}
+    );
+    
+    console.log(`✅ Bitcotasks: ${user.phone} got ৳${bdtAmount}`);
+    res.send('OK');
+  } catch (e) {
+    console.log('❌ Bitcotasks error:', e.message);
+    res.status(500).send('ERROR');
+  }
+});
 const PORT = process.env.PORT || 5000;
-
-
-app.get("/api/postback/bitcotasks", async (req, res) => { try { console.log("Bitcotasks:", req.query); const userId = req.query.user_id || req.query.subid; const amt = req.query.amount || req.query.payout; if (req.query.status && req.query.status !== "1") return res.send("OK"); if (!userId || !amt) return res.status(400).send("MISSING_PARAMS"); const result = await processReward(userId, amt, req.query.trans_id, "Bitcotasks"); if (result.status === "NOT_FOUND") return res.status(404).send("USER_NOT_FOUND"); res.send("OK"); } catch (e) { res.status(500).send("ERROR"); } });
-
 app.listen(PORT, () => console.log(`🚀 EARN MONEY Backend on port ${PORT}`));
-
-
