@@ -9,7 +9,8 @@ require('dotenv').config();
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(cors());
-app.use('/api', rateLimit({ windowMs: 60 * 1000, max: 200 }));
+app.set('trust proxy', 1);
+app.use('/api', rateLimit({ windowMs: 60 * 1000, max: 200, validate: { trustProxy: false } }));
 
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('✅ MongoDB connected'))
@@ -28,6 +29,14 @@ const User = mongoose.model('User', new mongoose.Schema({
   referredBy: String,
   hasCompletedTask: { type: Boolean, default: false },
   referralBonusPaid: { type: Boolean, default: false },
+  lastLoginBonus: { type: Date, default: null },
+  todayTaskCount: { type: Number, default: 0 },
+  lastTaskDate: { type: String, default: '' },
+  weekTaskCount: { type: Number, default: 0 },
+  lastWeekReset: { type: String, default: '' },
+  streakBonusPaid: { type: Boolean, default: false },
+  weeklyBonusPaid: { type: Boolean, default: false },
+  referredCount: { type: Number, default: 0 },
 }, { timestamps: true }));
 
 const Task = mongoose.model('Task', new mongoose.Schema({
@@ -70,35 +79,31 @@ const adminAuth = (req, res, next) => {
   } catch { res.status(403).json({ error: 'Admin only' }); }
 };
 
-// 🎁 CONFIG
 const WELCOME_BONUS = 50;
 const MIN_WITHDRAW = 100;
 const REFERRAL_BONUS = 25;
 const USD_TO_BDT = 110;
 const USER_REWARD_PERCENT = 50;
 
-// ============ AUTH ============
-app.post('/api/register', async (req, res) => {
+const BONUS = { DAILY_LOGIN: 5, TASK_STREAK: 20, WEEKLY: 100, REFER_3: 75 };
+
+function getDateStr() { return new Date().toISOString().slice(0, 10); }
+function getWeekStr() {
+  const d = new Date();
+  const year = d.getFullYear();
+  const week = Math.ceil(((d - new Date(year, 0, 1)) / 86400000 + 1) / 7);
+  return `${year}-W${week}`;
+}app.post('/api/register', async (req, res) => {
   try {
     const { phone, password, deviceId, name, referralCode } = req.body;
     if (!phone || !password || !deviceId) return res.status(400).json({ error: 'Missing fields' });
     if (await User.findOne({ deviceId })) return res.status(400).json({ error: 'একটি ডিভাইসে একটাই একাউন্ট!' });
     if (await User.findOne({ phone })) return res.status(400).json({ error: 'এই নাম্বারে একাউন্ট আছে!' });
-
     const hash = await bcrypt.hash(password, 10);
     const myCode = 'EM' + Math.random().toString(36).slice(2, 8).toUpperCase();
-    
-    const user = await User.create({
-      phone, password: hash, deviceId, name, referralCode: myCode, referredBy: referralCode,
-      balance: WELCOME_BONUS, totalEarned: WELCOME_BONUS
-    });
-
+    const user = await User.create({ phone, password: hash, deviceId, name, referralCode: myCode, referredBy: referralCode, balance: WELCOME_BONUS, totalEarned: WELCOME_BONUS });
     const token = jwt.sign({ id: user._id, phone, role: 'user' }, process.env.JWT_SECRET, { expiresIn: '30d' });
-    res.json({
-      message: `সফলভাবে রেজিস্ট্রেশন হয়েছে! 🎁 ${WELCOME_BONUS}৳ বোনাস পেয়েছ!`,
-      token,
-      user: { phone, name, balance: WELCOME_BONUS, pendingPoints: 0, referralCode: myCode }
-    });
+    res.json({ message: `সফলভাবে রেজিস্ট্রেশন হয়েছে! 🎁 ${WELCOME_BONUS}৳ বোনাস পেয়েছ!`, token, user: { phone, name, balance: WELCOME_BONUS, pendingPoints: 0, referralCode: myCode } });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -109,16 +114,12 @@ app.post('/api/login', async (req, res) => {
   if (user.isBanned) return res.status(403).json({ error: 'একাউন্ট ব্যান!' });
   if (deviceId && user.deviceId !== deviceId) return res.status(403).json({ error: 'ভিন্ন ডিভাইস!' });
   if (!await bcrypt.compare(password, user.password)) return res.status(400).json({ error: 'পাসওয়ার্ড ভুল!' });
-
   const token = jwt.sign({ id: user._id, phone, role: 'user' }, process.env.JWT_SECRET, { expiresIn: '30d' });
   res.json({ token, user: { phone, name: user.name, balance: user.balance, pendingPoints: user.pendingPoints, referralCode: user.referralCode } });
 });
 
-app.get('/api/me', auth, async (req, res) => {
-  res.json(await User.findOne({ phone: req.user.phone }).select('-password'));
-});
+app.get('/api/me', auth, async (req, res) => { res.json(await User.findOne({ phone: req.user.phone }).select('-password')); });
 
-// ============ TASKS ============
 app.get('/api/tasks', auth, async (req, res) => {
   const tasks = await Task.find({ isActive: true }).sort({ createdAt: -1 });
   const mySubs = await Submission.find({ phone: req.user.phone }).select('taskId status');
@@ -131,229 +132,123 @@ app.post('/api/submit-task', auth, async (req, res) => {
   if (!task) return res.status(404).json({ error: 'টাস্ক নেই!' });
   const dup = await Submission.findOne({ phone: req.user.phone, taskId, status: { $ne: 'REJECTED' } });
   if (dup) return res.status(400).json({ error: 'এই টাস্ক আগেই সাবমিট করেছ!' });
-
-  const sub = await Submission.create({
-    phone: req.user.phone, taskId, taskTitle: task.title,
-    siteUsername, transactionId, screenshotUrl, rewardAmt: task.rewardAmt
-  });
+  const sub = await Submission.create({ phone: req.user.phone, taskId, taskTitle: task.title, siteUsername, transactionId, screenshotUrl, rewardAmt: task.rewardAmt });
   await User.updateOne({ phone: req.user.phone }, { $inc: { pendingPoints: task.rewardAmt } });
   await Task.updateOne({ _id: task._id }, { $inc: { completed: 1 } });
   res.json({ message: 'সাবমিট সফল! এডমিন ভেরিফাই করবে।', sub });
 });
 
-app.get('/api/my-submissions', auth, async (req, res) => {
-  res.json(await Submission.find({ phone: req.user.phone }).sort({ createdAt: -1 }));
-});
+app.get('/api/my-submissions', auth, async (req, res) => { res.json(await Submission.find({ phone: req.user.phone }).sort({ createdAt: -1 })); });
 
-// ============ WITHDRAW ============
 app.post('/api/withdraw', auth, async (req, res) => {
   const { amount, paymentMethod, accountNumber } = req.body;
   const user = await User.findOne({ phone: req.user.phone });
   if (amount < MIN_WITHDRAW) return res.status(400).json({ error: `⚠️ সর্বনিম্ন ${MIN_WITHDRAW}৳ withdraw করতে হবে!` });
   if (user.balance < amount) return res.status(400).json({ error: 'ব্যালেন্স কম!' });
-
   await User.updateOne({ phone: user.phone }, { $inc: { balance: -amount } });
   const w = await Withdrawal.create({ phone: user.phone, amount, paymentMethod, accountNumber });
   res.json({ message: 'উইথড্র রিকোয়েস্ট পাঠানো হয়েছে!', w });
 });
 
-app.get('/api/my-withdrawals', auth, async (req, res) => {
-  res.json(await Withdrawal.find({ phone: req.user.phone }).sort({ createdAt: -1 }));
+app.get('/api/my-withdrawals', auth, async (req, res) => { res.json(await Withdrawal.find({ phone: req.user.phone }).sort({ createdAt: -1 })); });
+app.get('/api/notices', auth, async (req, res) => { res.json(await Notice.find({ isActive: true }).sort({ createdAt: -1 })); });
+app.get('/api/config', (req, res) => { res.json({ welcomeBonus: WELCOME_BONUS, minWithdraw: MIN_WITHDRAW, referralBonus: REFERRAL_BONUS, bonus: BONUS }); });app.post('/api/bonus/daily-login', auth, async (req, res) => {
+  try {
+    const user = await User.findOne({ phone: req.user.phone });
+    const today = getDateStr();
+    const lastLogin = user.lastLoginBonus ? user.lastLoginBonus.toISOString().slice(0, 10) : null;
+    if (lastLogin === today) return res.status(400).json({ error: '❌ আজকের bonus already পেয়েছেন!' });
+    await User.updateOne({ _id: user._id }, { $inc: { balance: BONUS.DAILY_LOGIN, totalEarned: BONUS.DAILY_LOGIN }, $set: { lastLoginBonus: new Date() } });
+    res.json({ message: `🎉 ৳${BONUS.DAILY_LOGIN} Daily Bonus পেয়েছেন!`, amount: BONUS.DAILY_LOGIN });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ============ NOTICE ============
-app.get('/api/notices', auth, async (req, res) => {
-  res.json(await Notice.find({ isActive: true }).sort({ createdAt: -1 }));
+app.get('/api/bonus/status', auth, async (req, res) => {
+  try {
+    const user = await User.findOne({ phone: req.user.phone });
+    const today = getDateStr();
+    const week = getWeekStr();
+    const lastLogin = user.lastLoginBonus ? user.lastLoginBonus.toISOString().slice(0, 10) : null;
+    const todayTasks = user.lastTaskDate === today ? user.todayTaskCount : 0;
+    const weekTasks = user.lastWeekReset === week ? user.weekTaskCount : 0;
+    res.json({
+      dailyLogin: { canClaim: lastLogin !== today, amount: BONUS.DAILY_LOGIN },
+      taskStreak: { canClaim: todayTasks >= 5 && !user.streakBonusPaid, amount: BONUS.TASK_STREAK, todayTasks, required: 5 },
+      weekly: { canClaim: weekTasks >= 50 && !user.weeklyBonusPaid, amount: BONUS.WEEKLY, weekTasks, required: 50 },
+      referral3: { canClaim: user.referredCount >= 3 && !user.referralBonusPaid, amount: BONUS.REFER_3, referredCount: user.referredCount, required: 3 },
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get('/api/config', (req, res) => {
-  res.json({ welcomeBonus: WELCOME_BONUS, minWithdraw: MIN_WITHDRAW, referralBonus: REFERRAL_BONUS });
+app.post('/api/bonus/task-streak', auth, async (req, res) => {
+  try {
+    const user = await User.findOne({ phone: req.user.phone });
+    const today = getDateStr();
+    const todayTasks = user.lastTaskDate === today ? user.todayTaskCount : 0;
+    if (todayTasks < 5) return res.status(400).json({ error: `❌ আজ ${todayTasks}/5 task complete!` });
+    if (user.streakBonusPaid) return res.status(400).json({ error: '❌ Already নিয়েছেন!' });
+    await User.updateOne({ _id: user._id }, { $inc: { balance: BONUS.TASK_STREAK, totalEarned: BONUS.TASK_STREAK }, $set: { streakBonusPaid: true } });
+    res.json({ message: `🔥 ৳${BONUS.TASK_STREAK} Streak Bonus পেয়েছেন!`, amount: BONUS.TASK_STREAK });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ============ CPX RESEARCH POSTBACK ============
+app.post('/api/bonus/weekly', auth, async (req, res) => {
+  try {
+    const user = await User.findOne({ phone: req.user.phone });
+    const week = getWeekStr();
+    const weekTasks = user.lastWeekReset === week ? user.weekTaskCount : 0;
+    if (weekTasks < 50) return res.status(400).json({ error: `❌ Ei week ${weekTasks}/50 task!` });
+    if (user.weeklyBonusPaid) return res.status(400).json({ error: '❌ Already নিয়েছেন!' });
+    await User.updateOne({ _id: user._id }, { $inc: { balance: BONUS.WEEKLY, totalEarned: BONUS.WEEKLY }, $set: { weeklyBonusPaid: true } });
+    res.json({ message: `📅 ৳${BONUS.WEEKLY} Weekly Bonus পেয়েছেন!`, amount: BONUS.WEEKLY });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/bonus/refer-3', auth, async (req, res) => {
+  try {
+    const user = await User.findOne({ phone: req.user.phone });
+    if (user.referredCount < 3) return res.status(400).json({ error: `❌ ${user.referredCount}/3 referral complete!` });
+    if (user.referralBonusPaid) return res.status(400).json({ error: '❌ Already নিয়েছেন!' });
+    await User.updateOne({ _id: user._id }, { $inc: { balance: BONUS.REFER_3, totalEarned: BONUS.REFER_3 }, $set: { referralBonusPaid: true } });
+    res.json({ message: `👥 ৳${BONUS.REFER_3} Refer Bonus পেয়েছেন!`, amount: BONUS.REFER_3 });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});async function processReward(user_id, amount_usd, trans_id, source) {
+  const existing = await Submission.findOne({ transactionId: trans_id });
+  if (existing) return { status: 'OK', msg: 'Duplicate' };
+  const user = await User.findOne({ phone: user_id });
+  if (!user) return { status: 'NOT_FOUND' };
+  if (user.isBanned) return { status: 'BANNED' };
+  const usdAmount = parseFloat(amount_usd);
+  const bdtAmount = Math.floor(usdAmount * USD_TO_BDT * (USER_REWARD_PERCENT / 100));
+  await User.updateOne({ _id: user._id }, { $inc: { balance: bdtAmount, totalEarned: bdtAmount } });
+  await Submission.create({ phone: user.phone, taskTitle: `${source} Task`, rewardAmt: bdtAmount, status: 'APPROVED', siteUsername: source, transactionId: trans_id || 'N/A' });
+  const today = getDateStr(); const week = getWeekStr();
+  const isNewDay = user.lastTaskDate !== today; const isNewWeek = user.lastWeekReset !== week;
+  await User.updateOne({ _id: user._id }, { $set: { lastTaskDate: today, lastWeekReset: week, todayTaskCount: isNewDay ? 1 : (user.todayTaskCount || 0) + 1, weekTaskCount: isNewWeek ? 1 : (user.weekTaskCount || 0) + 1, streakBonusPaid: isNewDay ? false : user.streakBonusPaid, weeklyBonusPaid: isNewWeek ? false : user.weeklyBonusPaid } });
+  return { status: 'OK', amount: bdtAmount };
+}
+
 app.get('/api/postback/cpx', async (req, res) => {
   try {
-    const { user_id, amount_usd, trans_id, status, hash } = req.query;
-    
-    console.log('📥 CPX Postback:', req.query);
-    
+    const { user_id, amount_usd, trans_id, status } = req.query;
     if (status === '2') {
       const oldSub = await Submission.findOne({ transactionId: trans_id, phone: user_id });
       if (oldSub && oldSub.status === 'APPROVED') {
-        await User.updateOne(
-          { phone: user_id },
-          { $inc: { balance: -oldSub.rewardAmt, totalEarned: -oldSub.rewardAmt } }
-        );
-        oldSub.status = 'REJECTED';
-        oldSub.rejectReason = 'CPX Reversed';
-        await oldSub.save();
-        console.log(`🔄 CPX Reversed: ${user_id}`);
+        await User.updateOne({ phone: user_id }, { $inc: { balance: -oldSub.rewardAmt, totalEarned: -oldSub.rewardAmt } });
+        oldSub.status = 'REJECTED'; oldSub.rejectReason = 'CPX Reversed'; await oldSub.save();
       }
       return res.send('OK');
     }
-    
     if (status !== '1') return res.send('OK');
-    if (!user_id || !amount_usd) return res.status(400).send('MISSING_PARAMS');
-    
-    const existing = await Submission.findOne({ transactionId: trans_id });
-    if (existing) {
-      console.log('⚠️ Duplicate txn:', trans_id);
-      return res.send('OK');
-    }
-    
-    const user = await User.findOne({ phone: user_id });
-    if (!user) {
-      console.log('❌ User not found:', user_id);
-      return res.status(404).send('USER_NOT_FOUND');
-    }
-    
-    if (user.isBanned) return res.status(403).send('USER_BANNED');
-    
-    const usdAmount = parseFloat(amount_usd);
-    const bdtAmount = Math.floor(usdAmount * USD_TO_BDT * (USER_REWARD_PERCENT / 100));
-    
-    await User.updateOne(
-      { _id: user._id },
-      { $inc: { balance: bdtAmount, totalEarned: bdtAmount } }
-    );
-    
-    await Submission.create({
-      phone: user.phone,
-      taskTitle: 'CPX Survey',
-      rewardAmt: bdtAmount,
-      status: 'APPROVED',
-      siteUsername: 'CPX Research',
-      transactionId: trans_id || 'N/A',
-    });
-    
-    console.log(`✅ CPX Reward: ${user.phone} got ৳${bdtAmount}`);
+    const result = await processReward(user_id, amount_usd, trans_id, 'CPX Research');
+    if (result.status === 'NOT_FOUND') return res.status(404).send('USER_NOT_FOUND');
+    if (result.status === 'BANNED') return res.status(403).send('USER_BANNED');
     res.send('OK');
-  } catch (e) {
-    console.log('❌ Postback error:', e.message);
-    res.status(500).send('ERROR');
-  }
+  } catch (e) { res.status(500).send('ERROR'); }
 });
 
-// ============ ADMIN ============
-app.post('/api/admin/login', (req, res) => {
-  const { username, password } = req.body;
-  if (username !== process.env.ADMIN_USER || password !== process.env.ADMIN_PASS)
-    return res.status(401).json({ error: 'ভুল ক্রেডেনশিয়াল' });
-  res.json({ token: jwt.sign({ role: 'admin' }, process.env.JWT_SECRET, { expiresIn: '7d' }) });
-});
-
-app.get('/api/admin/stats', adminAuth, async (req, res) => {
-  const [users, subs, ws, pendingSub, pendingW] = await Promise.all([
-    User.countDocuments(), Submission.countDocuments(), Withdrawal.countDocuments(),
-    Submission.countDocuments({ status: 'PENDING' }), Withdrawal.countDocuments({ status: 'PENDING' }),
-  ]);
-  const totalPaid = await Withdrawal.aggregate([{ $match: { status: 'APPROVED' } }, { $group: { _id: null, t: { $sum: '$amount' } } }]);
-  res.json({ users, submissions: subs, withdrawals: ws, pendingSub, pendingW, totalPaid: totalPaid[0]?.t || 0, welcomeBonus: WELCOME_BONUS, minWithdraw: MIN_WITHDRAW, referralBonus: REFERRAL_BONUS });
-});
-
-app.get('/api/admin/users', adminAuth, async (req, res) => {
-  res.json(await User.find().select('-password').sort({ createdAt: -1 }));
-});
-
-app.post('/api/admin/ban-user', adminAuth, async (req, res) => {
-  const { phone, ban } = req.body;
-  await User.updateOne({ phone }, { isBanned: ban });
-  res.json({ message: ban ? 'ব্যান করা হয়েছে' : 'আনব্যান করা হয়েছে' });
-});
-
-app.post('/api/admin/add-balance', adminAuth, async (req, res) => {
-  const { phone, amount } = req.body;
-  await User.updateOne({ phone }, { $inc: { balance: amount, totalEarned: amount } });
-  res.json({ message: 'ব্যালেন্স যোগ হয়েছে' });
-});
-
-app.post('/api/admin/add-task', adminAuth, async (req, res) => {
-  res.json(await Task.create(req.body));
-});
-app.get('/api/admin/tasks', adminAuth, async (req, res) => {
-  res.json(await Task.find().sort({ createdAt: -1 }));
-});
-app.put('/api/admin/task/:id', adminAuth, async (req, res) => {
-  res.json(await Task.findByIdAndUpdate(req.params.id, req.body, { new: true }));
-});
-app.delete('/api/admin/task/:id', adminAuth, async (req, res) => {
-  await Task.findByIdAndDelete(req.params.id);
-  res.json({ message: 'ডিলিট হয়েছে' });
-});
-
-app.get('/api/admin/submissions', adminAuth, async (req, res) => {
-  res.json(await Submission.find().sort({ createdAt: -1 }));
-});
-
-app.post('/api/admin/verify-task', adminAuth, async (req, res) => {
-  const { subId, status, rejectReason } = req.body;
-  const sub = await Submission.findById(subId);
-  if (!sub || sub.status !== 'PENDING') return res.status(400).json({ error: 'Already processed' });
-  
-  sub.status = status;
-  sub.rejectReason = rejectReason;
-  await sub.save();
-  
-  const user = await User.findOne({ phone: sub.phone });
-  user.pendingPoints -= sub.rewardAmt;
-  
-  if (status === 'APPROVED') {
-    user.balance += sub.rewardAmt;
-    user.totalEarned += sub.rewardAmt;
-    
-    if (user.referredBy && !user.referralBonusPaid) {
-      const referrer = await User.findOne({ referralCode: user.referredBy });
-      if (referrer && !referrer.isBanned) {
-        await User.updateOne(
-          { _id: referrer._id },
-          { $inc: { balance: REFERRAL_BONUS, totalEarned: REFERRAL_BONUS } }
-        );
-        user.referralBonusPaid = true;
-        user.hasCompletedTask = true;
-      }
-    } else {
-      user.hasCompletedTask = true;
-    }
-  }
-  
-  await user.save();
-  res.json({ 
-    message: `Task ${status}`, 
-    sub,
-    referralBonusPaid: user.referralBonusPaid || false,
-    referralAmount: REFERRAL_BONUS
-  });
-});
-
-app.get('/api/admin/withdrawals', adminAuth, async (req, res) => {
-  res.json(await Withdrawal.find().sort({ createdAt: -1 }));
-});
-app.post('/api/admin/verify-withdraw', adminAuth, async (req, res) => {
-  const { wId, status, rejectReason } = req.body;
-  const w = await Withdrawal.findById(wId);
-  if (!w || w.status !== 'PENDING') return res.status(400).json({ error: 'Already processed' });
-  w.status = status;
-  w.rejectReason = rejectReason;
-  await w.save();
-  if (status === 'REJECTED') {
-    await User.updateOne({ phone: w.phone }, { $inc: { balance: w.amount } });
-  }
-  res.json({ message: `Withdraw ${status}`, w });
-});
-
-app.post('/api/admin/notice', adminAuth, async (req, res) => {
-  res.json(await Notice.create(req.body));
-});
-app.get('/api/admin/notices', adminAuth, async (req, res) => {
-  res.json(await Notice.find().sort({ createdAt: -1 }));
-});
-app.delete('/api/admin/notice/:id', adminAuth, async (req, res) => {
-  await Notice.findByIdAndDelete(req.params.id);
-  res.json({ message: 'ডিলিট' });
-});
-
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 EARN MONEY Backend on port ${PORT}`));
-// Bonus force update Sat Oct  3 10:03:14 +06 2026
-// Force commit Sat Oct  3 10:22:16 +06 2026
-// BONUS_FORCE_UPDATE
+app.get('/api/postback/adgate', async (req, res) => { try { const { user_id, amount, trans_id, status } = req.query; if (status !== '1') return res.send('OK'); const result = await processReward(user_id, amount, trans_id, 'AdGate Media'); if (result.status === 'NOT_FOUND') return res.status(404).send('USER_NOT_FOUND'); res.send('OK'); } catch (e) { res.status(500).send('ERROR'); } });
+app.get('/api/postback/offertoro', async (req, res) => { try { const { user_id, amount, trans_id, status } = req.query; if (status !== '1') return res.send('OK'); const result = await processReward(user_id, amount, trans_id, 'OfferToro'); if (result.status === 'NOT_FOUND') return res.status(404).send('USER_NOT_FOUND'); res.send('OK'); } catch (e) { res.status(500).send('ERROR'); } });
+app.get('/api/postback/bitlabs', async (req, res) => { try { const { user_id, amount, trans_id, status } = req.query; if (status !== '1') return res.send('OK'); const result = await processReward(user_id, amount, trans_id, 'BitLabs'); if (result.status === 'NOT_FOUND') return res.status(404).send('USER_NOT_FOUND'); res.send('OK'); } catch (e) { res.status(500).send('ERROR'); } });
+app.get('/api/postback/adgem', async (req, res) => { try { const { user_id, amount, trans_id, status } = req.query; if (status !== '1') return res.send('OK'); const result = await processReward(user_id, amount, trans_id, 'AdGem'); if (result.status === 'NOT_FOUND') return res.status(404).send('USER_NOT_FOUND'); res.send('OK'); } catch (e) { res.status(500).send('ERROR'); } });
+app.get('/api/postback/ayet', async (req, res) => { try { const { user_id, amount, trans_id, status } = req.query; if (status !== '1') return res.send('OK'); const result = await processReward(user_id, amount, trans_id, 'Ayet Studios'); if (result.status === 'NOT_FOUND') return res.status(404).send('USER_NOT_FOUND'); res.send('OK'); } catch (e) { res.status(500).send('ERROR'); } });
