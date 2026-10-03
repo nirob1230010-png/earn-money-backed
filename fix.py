@@ -1,4 +1,4 @@
-const express = require("express");
+code = r'''const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
@@ -255,3 +255,6 @@ app.delete("/api/admin/notice/:id", adminAuth, async (req, res) => { await Notic
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log("EARN MONEY Backend on port " + PORT));
+'''
+open('index.js', 'w').write(code)
+print('DONE')
