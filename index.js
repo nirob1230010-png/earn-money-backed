@@ -70,10 +70,14 @@ const adminAuth = (req, res, next) => {
   } catch { res.status(403).json({ error: 'Admin only' }); }
 };
 
+// 🎁 CONFIG
 const WELCOME_BONUS = 50;
 const MIN_WITHDRAW = 100;
 const REFERRAL_BONUS = 25;
+const USD_TO_BDT = 110;
+const USER_REWARD_PERCENT = 50;
 
+// ============ AUTH ============
 app.post('/api/register', async (req, res) => {
   try {
     const { phone, password, deviceId, name, referralCode } = req.body;
@@ -114,6 +118,7 @@ app.get('/api/me', auth, async (req, res) => {
   res.json(await User.findOne({ phone: req.user.phone }).select('-password'));
 });
 
+// ============ TASKS ============
 app.get('/api/tasks', auth, async (req, res) => {
   const tasks = await Task.find({ isActive: true }).sort({ createdAt: -1 });
   const mySubs = await Submission.find({ phone: req.user.phone }).select('taskId status');
@@ -140,6 +145,7 @@ app.get('/api/my-submissions', auth, async (req, res) => {
   res.json(await Submission.find({ phone: req.user.phone }).sort({ createdAt: -1 }));
 });
 
+// ============ WITHDRAW ============
 app.post('/api/withdraw', auth, async (req, res) => {
   const { amount, paymentMethod, accountNumber } = req.body;
   const user = await User.findOne({ phone: req.user.phone });
@@ -155,6 +161,7 @@ app.get('/api/my-withdrawals', auth, async (req, res) => {
   res.json(await Withdrawal.find({ phone: req.user.phone }).sort({ createdAt: -1 }));
 });
 
+// ============ NOTICE ============
 app.get('/api/notices', auth, async (req, res) => {
   res.json(await Notice.find({ isActive: true }).sort({ createdAt: -1 }));
 });
@@ -163,6 +170,71 @@ app.get('/api/config', (req, res) => {
   res.json({ welcomeBonus: WELCOME_BONUS, minWithdraw: MIN_WITHDRAW, referralBonus: REFERRAL_BONUS });
 });
 
+// ============ CPX RESEARCH POSTBACK ============
+app.get('/api/postback/cpx', async (req, res) => {
+  try {
+    const { user_id, amount_usd, trans_id, status, hash } = req.query;
+    
+    console.log('📥 CPX Postback:', req.query);
+    
+    if (status === '2') {
+      const oldSub = await Submission.findOne({ transactionId: trans_id, phone: user_id });
+      if (oldSub && oldSub.status === 'APPROVED') {
+        await User.updateOne(
+          { phone: user_id },
+          { $inc: { balance: -oldSub.rewardAmt, totalEarned: -oldSub.rewardAmt } }
+        );
+        oldSub.status = 'REJECTED';
+        oldSub.rejectReason = 'CPX Reversed';
+        await oldSub.save();
+        console.log(`🔄 CPX Reversed: ${user_id}`);
+      }
+      return res.send('OK');
+    }
+    
+    if (status !== '1') return res.send('OK');
+    if (!user_id || !amount_usd) return res.status(400).send('MISSING_PARAMS');
+    
+    const existing = await Submission.findOne({ transactionId: trans_id });
+    if (existing) {
+      console.log('⚠️ Duplicate txn:', trans_id);
+      return res.send('OK');
+    }
+    
+    const user = await User.findOne({ phone: user_id });
+    if (!user) {
+      console.log('❌ User not found:', user_id);
+      return res.status(404).send('USER_NOT_FOUND');
+    }
+    
+    if (user.isBanned) return res.status(403).send('USER_BANNED');
+    
+    const usdAmount = parseFloat(amount_usd);
+    const bdtAmount = Math.floor(usdAmount * USD_TO_BDT * (USER_REWARD_PERCENT / 100));
+    
+    await User.updateOne(
+      { _id: user._id },
+      { $inc: { balance: bdtAmount, totalEarned: bdtAmount } }
+    );
+    
+    await Submission.create({
+      phone: user.phone,
+      taskTitle: 'CPX Survey',
+      rewardAmt: bdtAmount,
+      status: 'APPROVED',
+      siteUsername: 'CPX Research',
+      transactionId: trans_id || 'N/A',
+    });
+    
+    console.log(`✅ CPX Reward: ${user.phone} got ৳${bdtAmount}`);
+    res.send('OK');
+  } catch (e) {
+    console.log('❌ Postback error:', e.message);
+    res.status(500).send('ERROR');
+  }
+});
+
+// ============ ADMIN ============
 app.post('/api/admin/login', (req, res) => {
   const { username, password } = req.body;
   if (username !== process.env.ADMIN_USER || password !== process.env.ADMIN_PASS)
